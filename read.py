@@ -1,6 +1,10 @@
 import fitz  # PyMuPDF
 import logging
-from docx import Document  # This will now work correctly
+from docx import Document
+from groq import Groq
+import base64
+import os
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +41,36 @@ def read_documents(documents):
                     text += f.read()
                 logger.info(f"Extracted TXT content from {document.name}")
             
+            elif document.path.endswith(('.png', '.jpg', '.jpeg', "webp")):
+                base64_image = encode_image(document.path)
+
+                client = Groq(api_key = os.environ.get("GROQ_API_KEY"))
+
+                ext = document.path.rsplit('.', 1)[-1].lower()
+                mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+
+                chat_completion = client.chat.completions.create(
+                    messages = [
+                        {
+                            "role":"user",
+                            "content":[
+                                {"type": "text", "text": "Describe the content of this in details."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime};base64,{base64_image}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    model = "meta-llama/llama-4-scout-17b-16e-instruct"
+                )
+                
+                text += f"\n\n=== File: {document.name} ===\n\n"
+                text += chat_completion.choices[0].message.content
+                logger.info(f"Extracted image description from {document.name}")
+
             else:
                 logger.warning(f"Unsupported file type: {document.name}")
         
@@ -45,3 +79,10 @@ def read_documents(documents):
             text += f"\n\n⚠️ Could not read {document.name}: {str(e)}\n\n"
     
     return text
+
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+    
+if __name__ == "__main__":
+    logger.info("cannot import this module")
