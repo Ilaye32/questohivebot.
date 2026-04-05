@@ -13,8 +13,13 @@ tavily-python==0.7.12
 chainlit
 pydub
 ffmpeg-python
-docx
+brightdata
 fitz
+langchain-mcp-adapters
 langchain-google-genai
+brightdata
+python-docx
 crawl4ai>=0.3.0
 playwright>=1.40.0
+nest_asyncio
+firecrawl
