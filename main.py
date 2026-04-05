@@ -1,27 +1,137 @@
 import os
 import logging
 import asyncio
+from typing import List, TypedDict, Union
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_mcp_adapters.tools import load_mcp_tools
+import json
 import sys
+from firecrawl import Firecrawl
+import re
 from typing import List, Optional
 from dotenv import load_dotenv
 
 import chainlit as cl
 from groq import Groq
 from langchain_groq import ChatGroq
+from langchain_core.tools import tool
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_tavily import TavilySearch
-from langgraph.prebuilt import create_react_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from google import genai
+from google.genai import types
+from langgraph.prebuilt import create_react_agent, tool_node, tools_condition
+
 
 from read import read_documents
 from audio import convert_raw_pcm_to_wav
+from read import read_documents
 from detect_format import detect_audio_format
-from prompts import prompt
-from seek import crawl_page_advanced
-from seek import analyze_page_content
-from seek import get_site_statistics
+load_dotenv()
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+@tool
+def get_ai_response(query: str) -> str:
+    """This is the tool used to get knowledge from about the knowledge base."""
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents= query ,
+            config=types.GenerateContentConfig(
+                tools=[
+                    types.Tool(
+                        file_search=types.FileSearch(
+                            file_search_store_names=["fileSearchStores/vitjm1dcimsg-wdjru7cw5d6y"]
+                        )
+                    )
+                ]
+            )
+        )
+        return response.text
+    except Exception as e:
+        return f"Information not available: {str(e)}"
+
+
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+
+# 1. Define your global configurations (Proxies, Headless, etc.)
+browser_config = BrowserConfig(
+    headless=True,
+    proxy_config={
+        "server": "http://proxy.example.com:8080", # Replace with actual or env var
+        "username": "user",
+        "password": "pass"
+    }
+)
+
+# 2. Wrap the logic in a dynamic tool
+@tool
+async def deep_scrape_tool(url: str) -> str:
+    """
+    An advanced web scraper. Use this when you need to bypass bot detection 
+    or read complex websites that standard tools can't handle.
+    
+    Args:
+        url (str): The specific URL the agent wants to investigate.
+    """
+    # We use a session_id to maintain state (useful if the agent 
+    # scrapes multiple pages on the same site).
+    run_config = CrawlerRunConfig(session_id="agent_session")
+
+    try:
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            result = await crawler.arun(url=url, config=run_config)
+            
+            if result.success:
+                # Return the markdown—it's the best format for AI to process
+                return result.markdown
+            else:
+                return f"Scrape failed: {result.error_message}"
+                
+    except Exception as e:
+        return f"An error occurred while scraping: {str(e)}"
+
+# Initialize the client once outside the function so it can be reused
+firecrawl = Firecrawl(api_key=os.getenv('FIRECRAWL_API_KEY'))
+
+@tool
+def scrape_with_firecrawl(url: str) -> str:
+    """
+    Scrapes the text content of a website. 
+    Use this tool when you need to read a specific URL to gather real-time information.
+    
+    Args:
+        url (str): The exact URL of the website to scrape.
+    """
+    # The 'url' variable is passed in by the AI Agent dynamically
+    try:
+        response = firecrawl.crawl(
+            url, 
+            limit=1, # Keep limit low for simple single-page agent reads
+            scrape_options={
+                'formats': ['markdown'], # Markdown is easiest for LLMs to read
+                'proxy': 'auto',
+                'only_main_content': True 
+            }
+        )
+        
+        # Return the markdown text back to the LLM's "brain"
+        # Adjust the key based on how your specific version of firecrawl structures the dict
+        return str(response) 
+        
+    except Exception as e:
+        return f"Error scraping the website: {str(e)}"
+
+def tavily_fuction():
+    search_tool = TavilySearch(api_key=os.getenv("TAVILY_API_KEY"),
+        search_depth="advanced")
+    return search_tool
+
+# class stategraph(TypedDict):
+#     messages: list[basemessages], add_messages]
 
 class Config:
     """Centralized configuration"""
@@ -32,15 +142,21 @@ class Config:
     MIN_AUDIO_SIZE_KB = 0.001
     
     # LLM settings
-    LLM_MODEL = "llama-3.1-8b-instant"
-    LLM_TEMPERATURE = 0.7
+    LLM_MODEL = "gemini-2.5-flash-lite"
+    LLM_TEMPERATURE = 0
     MAX_HISTORY_MESSAGES = 20
-    REQUEST_TIMEOUT = 30
+    REQUEST_TIMEOUT = 120 # seconds
     MAX_INPUT_LENGTH = 10000
     
     # System prompt
-    SYSTEM_PROMPT = prompt
+    SYSTEM_PROMPT = f"""Introduce yourself asJohnny, Ilaye's AI assistant.:
+   1. Use {tavily_fuction} to search the web for information.\n
+   2. Use the {scrape_with_firecrawl} to scrape the web for information.\n
+   3. Use the {deep_scrape_tool} to scrape complex websites.\n
+   4. If an Image is uploaded use the image description based on the conversation context.\n
+   5. Use {get_ai_response} to answer about Ilaye your creator when asked\n .
 
+    """
 
 # ============================================================================
 # LOGGING SETUP
@@ -67,7 +183,7 @@ logger = setup_logging()
 
 def validate_environment() -> None:
     """Validate required environment variables"""
-    required_vars = ["GROQ_API_KEY", "TAVILY_API_KEY"]
+    required_vars = ["GROQ_API_KEY", "TAVILY_API_KEY", "GOOGLE_API_KEY"]
     missing = [var for var in required_vars if not os.getenv(var)]
     
     if missing:
@@ -79,6 +195,9 @@ def validate_environment() -> None:
         )
 
 
+search_tool = tavily_fuction()
+# 2. Call the function
+
 def initialize_services():
     """Initialize all required services"""
     load_dotenv()
@@ -89,19 +208,17 @@ def initialize_services():
         groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         
         # Initialize web search tool
-        search_tool = TavilySearch(
-            api_key=os.getenv("TAVILY_API_KEY"),
-            max_results=3
-        )
-        tools = [search_tool, get_site_statistics, crawl_page_advanced, analyze_page_content ]
+
+        tools = [search_tool, scrape_with_firecrawl, deep_scrape_tool, get_ai_response]
         
         # Initialize LLM with tools
-        llm_model = ChatGroq(
+        llm_model = ChatGoogleGenerativeAI(
             temperature=Config.LLM_TEMPERATURE,
-            model_name=Config.LLM_MODEL,
-            groq_api_key=os.getenv("GROQ_API_KEY"),
+            model=Config.LLM_MODEL,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
             timeout=Config.REQUEST_TIMEOUT,
             streaming=True
+            
         )
         
         # Create agent
@@ -129,6 +246,7 @@ groq_client, llm_agent = initialize_services()
 
 def trim_history(history: List[BaseMessage]) -> List[BaseMessage]:
     """Keep conversation history within limits"""
+
     if len(history) > Config.MAX_HISTORY_MESSAGES:
         logger.info(f"Trimming history from {len(history)} to {Config.MAX_HISTORY_MESSAGES}")
         return history[-Config.MAX_HISTORY_MESSAGES:]
@@ -227,7 +345,7 @@ async def process_user_input(content: str) -> None:
     """
     Process user input using the agent with tool support.
     """
-    # Validate input (unchanged)
+    # Validate input
     if not content or not content.strip():
         await cl.Message(content="⚠️ Empty message received.").send()
         return
@@ -238,36 +356,56 @@ async def process_user_input(content: str) -> None:
         ).send()
         return
     
-    # Get conversation history (as messages)
+    # Get conversation history
     history = cl.user_session.get("history", [])
-    history.append(HumanMessage(content=content))
+    history.append(HumanMessage(content=content))     
     history = trim_history(history)
     cl.user_session.set("history", history)
     
-    # Initialize streaming message
+    # Show animated thinking message
+    thinking_msg = cl.Message(
+        content="""
+        <div class="thinking-dots">
+            <span></span><span></span><span></span>
+        </div>
+        """
+    )
+
+    await thinking_msg.send()
+
+    # Initialize streaming message (not sent yet)
     response_msg = cl.Message(content="")
-    await response_msg.send()
+    first_chunk = True
     
     try:
         full_response = ""
-        
-        # Use the global agent for invocation
-        # Prepare input as a dict with messages (LangGraph format)
         input_dict = {"messages": history}
         
-        # Stream from agent (use astream_events for tool-aware streaming)
-        async for event in llm_agent.astream_events(input_dict, version="v1"):
+        async for event in llm_agent.astream_events(input_dict, version="v2"):
             kind = event["event"]
             if kind == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 if chunk.content:
-                    await response_msg.stream_token(chunk.content)
-                    full_response += chunk.content
+                    
+                    # Remove thinking dots and send response message on first real chunk
+                    if first_chunk:
+                        await thinking_msg.remove()
+                        await response_msg.send()
+                        first_chunk = False
+
+                    content = chunk.content
+                    if isinstance(content, list):
+                        content = "".join(
+                            part.get("text", "") if isinstance(part, dict) else str(part)
+                            for part in content
+                        )
+                    await response_msg.stream_token(content)
+                    full_response += content
+
             elif kind == "on_tool_start":
-                # Optional: Log or display tool usage (e.g., "Searching web...")
                 logger.info(f"Tool started: {event['name']}")
+
             elif kind == "on_tool_end":
-                # Optional: Handle tool outputs if needed
                 logger.info(f"Tool ended: {event['name']}, output={event['data'].get('output')}")
         
         # Finalize response
@@ -277,28 +415,59 @@ async def process_user_input(content: str) -> None:
         if full_response:
             history.append(AIMessage(content=full_response))
             history = trim_history(history)
+            
             cl.user_session.set("history", history)
             logger.info(f"Response generated: {len(full_response)} chars")
         else:
+            await thinking_msg.remove()
             response_msg.content = "⚠️ No response generated. Please try again."
-            await response_msg.update()
+            await response_msg.send()
     
     except asyncio.TimeoutError:
         logger.error("Agent request timed out")
+        await thinking_msg.remove()
         response_msg.content = "⚠️ Request timed out. Please try again."
-        await response_msg.update()
+        await response_msg.send()
     
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        await thinking_msg.remove()
         response_msg.content = get_user_friendly_error(e)
-        await response_msg.update()
-
+        await response_msg.send()
 
 
 
 # ============================================================================
 # CHAINLIT EVENT HANDLERS
 # ============================================================================
+
+@cl.set_starters
+async def set_starters():
+    return [
+        cl.Starter(
+            label="Morning routine ideation",
+            message="Can you help me create a personalized morning routine that would help increase my productivity throughout the day? Start by asking me about my current habits and what activities energize me in the morning.",
+         #   icon="/public/idea.svg",
+        ),
+
+        cl.Starter(
+            label="Explain superconductors",
+            message="Explain superconductors like I'm five years old.",
+         #   icon="/public/learn.svg",
+        ),
+        cl.Starter(
+            label="How Mercor hires",
+            message="Can you explain the hiring process at Mercor?",
+         #   icon="/public/terminal.svg",
+        ),
+        cl.Starter(
+            label="Text inviting friend to wedding",
+            message="Write a text asking a friend to be my plus-one at a wedding next month. I want to keep it super short and casual, and offer an out.",
+          #  icon="/public/write.svg",
+        )
+    ]
+# ...
+
 
 @cl.on_chat_start
 async def on_chat_start() -> None:
@@ -307,17 +476,9 @@ async def on_chat_start() -> None:
     cl.user_session.set("audio_buffer", [])
     logger.info("New chat session started")
     
-    await cl.Message(
-        content=(
-            "🎓 **Welcome to QuestoHive!**\n\n"
-            "I'm here to help you learn and understand past exam questions.\n\n"
-            "You can:\n"
-            "- 🎙️ Click the microphone to ask questions with your voice\n"
-            "- ⌨️ Type your questions below\n"
-            "- 📄 Upload documents for me to analyze\n\n"
-            "How can I help you today?"
-        )
-    ).send()
+@cl.on_chat_start
+async def start():
+    cl.user_session.set("message_history", [])
 
 
 @cl.on_audio_start
@@ -325,6 +486,11 @@ async def on_audio_start() -> bool:
     """Handle start of audio recording"""
     logger.info("Audio recording started")
     return True
+
+def prompt_decision(conversation):
+    if  len(conversation) == 1:
+        return Config.SYSTEM_PROMPT
+    return Config.welcome_prompt
 
 
 @cl.on_audio_chunk
@@ -395,14 +561,14 @@ async def on_message(message: cl.Message) -> None:
     if message.elements:
         uploaded_files = [
             file for file in message.elements 
-            if isinstance(file, cl.File)
+            if isinstance(file, (cl.File,cl.Image))
         ]
         
         if uploaded_files:
             logger.info(f"Processing {len(uploaded_files)} uploaded file(s)")
             
             try:
-                document_content = read_documents(uploaded_files)
+                document_content = document_content = read_documents(uploaded_files)
                 
                 if document_content.strip():
                     # Prepend document context to user message
