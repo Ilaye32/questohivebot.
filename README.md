@@ -1,155 +1,179 @@
-# QuestoHive 🎓
+# QuestoHive 🤖
 
-An AI-powered academic tutoring chatbot that helps students master past exam questions through voice and text interaction. Built with Chainlit, LangGraph, and Groq.
+> A production-grade, multimodal AI assistant built with LangGraph, Chainlit, and Google Gemini — featuring voice input, document understanding, real-time web search, and RAG-powered knowledge retrieval.
 
 ---
 
-## Features
+## Overview
 
-- 🎙️ **Voice Input** — Record questions using the built-in microphone; audio is transcribed via Groq Whisper
-- ⌨️ **Text Chat** — Type questions directly for instant structured explanations
-- 📄 **Document Upload** — Upload PDF, DOCX, or TXT files for the bot to analyze and extract exam-relevant content
-- 🔍 **Web Search** — Powered by Tavily, the agent searches the web when real-time or verified information is needed
-- 🕸️ **Web Crawling** — Advanced page crawling and content analysis tools for deep research
-- 🧠 **Agentic Reasoning** — LangGraph ReAct agent with tool-use for multi-step problem solving
-- 🔄 **Streaming Responses** — Real-time token streaming for a smooth chat experience
-- 📝 **Conversation History** — Maintains context across the session with automatic history trimming
+QuestoHive is a full-stack conversational AI application designed for real-world deployment. It combines a **ReAct agent architecture** with a polished Chainlit UI to deliver a chatbot that can reason, search the web, scrape websites, process uploaded documents, and answer questions from a custom knowledge base — all while supporting both text and voice input.
+
+Built as a core project within the [Questohive](https://github.com/Ilaye32/questohivebot) AI startup, this codebase demonstrates end-to-end LLM engineering from prompt design to async streaming to multi-modal input handling.
+
+---
+
+## Key Features
+
+| Feature | Details |
+|---|---|
+| 🎙️ **Voice Input (STT)** | Records audio via Chainlit, detects format (WebM, WAV, PCM, OGG, MP3), converts raw PCM to WAV, and transcribes using **Groq Whisper Large v3** |
+| 🧠 **ReAct Agent** | Powered by `langgraph.prebuilt.create_react_agent` with multi-tool reasoning loop |
+| 🔍 **Web Search** | Integrated **Tavily Search** (advanced depth) for real-time information retrieval |
+| 🕷️ **Web Scraping** | Dual scraper setup: **Firecrawl** for standard pages and **Crawl4AI** with headless browser + proxy for bot-protected sites |
+| 📚 **RAG / Knowledge Base** | Gemini `file_search` tool backed by a **Google File Search Store** for domain-specific Q&A |
+| 📄 **Document Processing** | Accepts PDF (PyMuPDF), DOCX (python-docx), TXT, and images; images are described via **Llama 4 Scout** vision model through Groq |
+| 💬 **Streaming Responses** | Full async token streaming via `astream_events` with animated thinking indicator |
+| 🗂️ **Conversation Memory** | Rolling message history with configurable trim window (default: 20 messages) |
+
+---
+
+## Architecture
+
+```
+User Input (Text / Voice / File)
+        │
+        ▼
+  Chainlit UI Layer
+        │
+   ┌────┴─────────────────────────────┐
+   │         on_message handler        │
+   │   on_audio_end → Groq Whisper STT │
+   └────┬─────────────────────────────┘
+        │
+        ▼
+  read_documents()          ← PDF / DOCX / TXT / Image
+        │
+        ▼
+  process_user_input()
+        │
+        ▼
+  LangGraph ReAct Agent (Gemini 2.5 Flash Lite)
+        │
+   ┌────┴──────────────────────────────────┐
+   │              Tool Router               │
+   ├── TavilySearch       (web search)      │
+   ├── scrape_with_firecrawl  (web scrape)  │
+   ├── deep_scrape_tool   (headless scrape) │
+   └── get_ai_response    (RAG / KB lookup) │
+        └──────────────────────────────────┘
+        │
+        ▼
+  Streaming Response → Chainlit UI
+```
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| UI / Chat Interface | [Chainlit](https://chainlit.io) |
-| LLM | Groq (`llama-3.1-8b-instant`) |
-| Speech-to-Text | Groq Whisper (`whisper-large-v3`) |
-| Agent Framework | LangGraph (`create_react_agent`) |
-| Web Search | Tavily |
-| Web Crawling | Crawl4AI + Playwright |
-| Document Parsing | PyMuPDF (PDF), python-docx (DOCX) |
-| Audio Processing | Python `wave` module (PCM → WAV) |
+**LLM & Agent**
+- `langchain-google-genai` — Gemini 2.5 Flash Lite as primary LLM
+- `langgraph` — ReAct agent with `create_react_agent`
+- `langchain-groq` — Groq API integration
+- `google-genai` — Native Gemini client for RAG / File Search
+
+**Voice**
+- `groq` — Whisper Large v3 for speech-to-text
+- Custom PCM → WAV converter with format auto-detection
+
+**Web & Data**
+- `langchain-tavily` — Advanced web search
+- `firecrawl` — Markdown-first web scraping
+- `crawl4ai` — Headless browser scraping with proxy support
+
+**Document Parsing**
+- `PyMuPDF (fitz)` — PDF extraction
+- `python-docx` — DOCX parsing
+- `Llama 4 Scout` via Groq — Image description (vision)
+
+**UI & Infrastructure**
+- `chainlit` — Chat UI with audio, file upload, and streaming support
+- `python-dotenv` — Environment configuration
+- `langchain-mcp-adapters` — MCP tool integration support
 
 ---
 
 ## Project Structure
 
 ```
-questohive/
-├── main.py              # App entry point, Chainlit handlers, agent setup
-├── prompt.py            # System prompt for the academic tutor persona
-├── audio.py             # Raw PCM to WAV conversion and audio logging
+questohivebot/
+├── main.py              # Chainlit app, agent setup, all event handlers
+├── read.py              # Document reader (PDF, DOCX, TXT, images)
+├── audio.py             # Raw PCM → WAV converter + logging
 ├── detect_format.py     # Magic-byte audio format detection
-├── read.py              # Document reading (PDF, DOCX, TXT)
-├── seek.py              # Web crawling and page analysis tools
-├── requirements.txt     # Python dependencies
-├── LICENSE              # MIT License
-└── .env                 # Environment variables (not committed)
+├── requirements.txt     # Pinned dependencies
+└── .env                 # API keys (not committed)
 ```
 
 ---
 
-## Getting Started
+## Setup & Installation
 
 ### Prerequisites
-
 - Python 3.10+
-- A [Groq API key](https://console.groq.com)
-- A [Tavily API key](https://tavily.com)
+- API keys for: Groq, Google AI, Tavily, Firecrawl
 
-### Installation
+### Install
 
-1. **Clone the repository**
+```bash
+git clone https://github.com/Ilaye32/questohivebot.git
+cd questohivebot
+pip install -r requirements.txt
+playwright install  # Required for Crawl4AI headless browser
+```
 
-   ```bash
-   git clone https://github.com/your-username/questohive.git
-   cd questohive
-   ```
+### Configure
 
-2. **Create and activate a virtual environment**
+Create a `.env` file in the project root:
 
-   ```bash
-   python -m venv venv
-   source venv/bin/activate      # macOS/Linux
-   venv\Scripts\activate         # Windows
-   ```
+```env
+GROQ_API_KEY=your_groq_key
+GOOGLE_API_KEY=your_google_key
+TAVILY_API_KEY=your_tavily_key
+FIRECRAWL_API_KEY=your_firecrawl_key
+```
 
-3. **Install dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Install Playwright browsers** (required for web crawling)
-
-   ```bash
-   playwright install
-   ```
-
-5. **Set up environment variables**
-
-   Create a `.env` file in the project root:
-
-   ```env
-   GROQ_API_KEY=your_groq_api_key_here
-   TAVILY_API_KEY=your_tavily_api_key_here
-   ```
-
-### Running the App
+### Run
 
 ```bash
 chainlit run main.py
 ```
 
-Then open your browser at `http://localhost:8000`.
+Open `http://localhost:8000` in your browser.
 
 ---
 
-## Usage
+## Environment Variables
 
-| Action | How |
-|---|---|
-| Ask a question | Type in the chat input and press Enter |
-| Voice question | Click the microphone icon, speak, then stop recording |
-| Upload a document | Attach a PDF, DOCX, or TXT file with your message |
-| Web-verified answer | The agent automatically searches when needed |
-
----
-
-## Configuration
-
-Key settings are managed in the `Config` class inside `main.py`:
-
-| Setting | Default | Description |
+| Variable | Required | Description |
 |---|---|---|
-| `LLM_MODEL` | `llama-3.1-8b-instant` | Groq chat model |
-| `WHISPER_MODEL` | `whisper-large-v3` | Groq transcription model |
-| `LLM_TEMPERATURE` | `0.7` | Response creativity |
-| `MAX_HISTORY_MESSAGES` | `20` | Rolling context window size |
-| `MAX_AUDIO_SIZE_MB` | `25` | Maximum audio upload size |
-| `MAX_INPUT_LENGTH` | `10000` | Maximum text input length |
+| `GROQ_API_KEY` | ✅ | Groq API — Whisper STT + Llama 4 vision |
+| `GOOGLE_API_KEY` | ✅ | Gemini LLM + File Search RAG |
+| `TAVILY_API_KEY` | ✅ | Real-time web search |
+| `FIRECRAWL_API_KEY` | ✅ | Web scraping |
 
 ---
 
-## How It Works
+## Engineering Highlights
 
-1. **User sends a message** (text, voice, or file upload)
-2. **Audio** is buffered in chunks, converted from raw PCM to WAV if needed, then transcribed with Groq Whisper
-3. **Documents** are parsed by `read.py` and prepended as context to the user message
-4. **The LangGraph agent** receives the full conversation history and decides whether to answer directly or invoke tools (Tavily search, web crawl, page analysis)
-5. **Streamed response** is sent token-by-token back to the Chainlit UI
-6. **Conversation history** is updated and trimmed to the configured window size
-
----
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
+- **Format-agnostic audio pipeline**: Magic-byte detection across WebM, WAV, OGG, MP3, and raw PCM with automatic conversion before transcription.
+- **Dual scraper fallback**: Firecrawl handles standard pages; Crawl4AI with headless Playwright and proxy handles bot-protected sites.
+- **Async-first design**: All I/O-heavy operations (`process_audio`, `process_user_input`, agent streaming) are fully `async` with `asyncio.to_thread` for blocking SDK calls.
+- **Graceful error handling**: User-friendly error messages for rate limits, timeouts, auth failures, and empty transcriptions — no raw stack traces exposed.
+- **Streaming UX**: Animated thinking dots shown while the agent reasons; replaced token-by-token once the first chunk arrives.
 
 ---
 
 ## Author
 
-**Ilaye Clifford Timibofa**  
-AI Engineer · LLM Evaluation Specialist  
-[GitHub](https://github.com/your-username) · [LinkedIn](https://linkedin.com/in/your-profile)
+**Ilaye Timibofa Clifford**  
+AI Engineer · LLM QA Specialist · B.Eng Mechanical Engineering (Rivers State University)
+
+- 🔗 [GitHub](https://github.com/Ilaye32)
+- 💼 AI Engineer @ Questohive | AI Trainer @ Mindrift (Toloka)
+- 🛠️ Skills: LangChain · LangGraph · RAG · Prompt Engineering · LLM Evaluation · Red-teaming
+
+---
+
+## License
+
+MIT
