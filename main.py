@@ -1,14 +1,11 @@
 import os
 import logging
 import asyncio
-from typing import List, TypedDict, Union
-from langgraph.checkpoint.memory import InMemorySaver
-from langchain_mcp_adapters.tools import load_mcp_tools
+from typing import List, TypedDict, Union, Optional
 import json
 import sys
 from firecrawl import Firecrawl
 import re
-from typing import List, Optional
 from dotenv import load_dotenv
 
 import chainlit as cl
@@ -23,16 +20,19 @@ from google import genai
 from google.genai import types
 from langgraph.prebuilt import create_react_agent, tool_node, tools_condition
 
+from elevenlabs import play, VoiceSettings
+from elevenlabs.client import ElevenLabs
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
 from read import read_documents
 from audio import convert_raw_pcm_to_wav
-from read import read_documents
 from detect_format import detect_audio_format
 load_dotenv()
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 @tool
 def get_ai_response(query: str) -> str:
     """This is the tool used to get knowledge from about the knowledge base."""
@@ -55,7 +55,7 @@ def get_ai_response(query: str) -> str:
         return f"Information not available: {str(e)}"
 
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+
 
 # 1. Define your global configurations (Proxies, Headless, etc.)
 browser_config = BrowserConfig(
@@ -130,9 +130,6 @@ def tavily_fuction():
         search_depth="advanced")
     return search_tool
 
-# class stategraph(TypedDict):
-#     messages: list[basemessages], add_messages]
-
 class Config:
     """Centralized configuration"""
     
@@ -149,13 +146,10 @@ class Config:
     MAX_INPUT_LENGTH = 10000
     
     # System prompt
-    SYSTEM_PROMPT = f"""Introduce yourself asJohnny, Ilaye's AI assistant.:
-   1. Use {tavily_fuction} to search the web for information.\n
-   2. Use the {scrape_with_firecrawl} to scrape the web for information.\n
-   3. Use the {deep_scrape_tool} to scrape complex websites.\n
-   4. If an Image is uploaded use the image description based on the conversation context.\n
-   5. Use {get_ai_response} to answer about Ilaye your creator when asked\n .
-
+    SYSTEM_PROMPT = f""" You must obey the following instructions:\n
+    1. Introduce yourself as Ella, Ilaye's AI assistant.\n
+    2. You were made by Ilaye to help answer questions and provide information.\n
+    3. Use the {tavily_fuction.__name__} tool to confirm current data what you have in your knowledge base is not current.\n
     """
 
 # ============================================================================
@@ -196,7 +190,7 @@ def validate_environment() -> None:
 
 
 search_tool = tavily_fuction()
-# 2. Call the function
+
 
 def initialize_services():
     """Initialize all required services"""
@@ -336,16 +330,33 @@ async def process_audio(audio_data: bytes) -> tuple[str, bytes, str]:
     logger.info(f"Transcription successful: '{text[:50]}...'")
     return text.strip(), playback_audio, playback_mime
 
+# ----------------------------------------------------
+# Eleven labs configuration
+# ----------------------------------------------------
 
-# ============================================================================
-# CONVERSATION PROCESSING - FIXED VERSION
-# ============================================================================
+def play_audio(text: str) -> bytes:
+    """Convert text to speech using ElevenLabs and return audio bytes"""
+    
+    audio = elevenlabs_client.text_to_speech.convert(
+        voice_id="FGY2WhTYpPnrIDTdsKH5",
+        output_format="mp3_22050_32",
+        text=text,
+        model_id="eleven_turbo_v2_5",
+        voice_settings=VoiceSettings(
+            stability=0.0,
+            similarity_boost=1.0,
+            style=0.0,
+            use_speaker_boost=True,
+        ),
+    )
+    
+    audio_bytes = b"".join(audio)
+    return audio_bytes
+
 
 async def process_user_input(content: str) -> None:
-    """
-    Process user input using the agent with tool support.
-    """
-    # Validate input
+    """Process user input using the agent with tool support."""
+    
     if not content or not content.strip():
         await cl.Message(content="⚠️ Empty message received.").send()
         return
@@ -356,13 +367,11 @@ async def process_user_input(content: str) -> None:
         ).send()
         return
     
-    # Get conversation history
     history = cl.user_session.get("history", [])
-    history.append(HumanMessage(content=content))     
+    history.append(HumanMessage(content=content))
     history = trim_history(history)
     cl.user_session.set("history", history)
     
-    # Show animated thinking message
     thinking_msg = cl.Message(
         content="""
         <div class="thinking-dots">
@@ -370,10 +379,8 @@ async def process_user_input(content: str) -> None:
         </div>
         """
     )
-
     await thinking_msg.send()
-
-    # Initialize streaming message (not sent yet)
+    
     response_msg = cl.Message(content="")
     first_chunk = True
     
@@ -383,16 +390,16 @@ async def process_user_input(content: str) -> None:
         
         async for event in llm_agent.astream_events(input_dict, version="v2"):
             kind = event["event"]
+            
             if kind == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 if chunk.content:
                     
-                    # Remove thinking dots and send response message on first real chunk
                     if first_chunk:
                         await thinking_msg.remove()
                         await response_msg.send()
                         first_chunk = False
-
+                    
                     content = chunk.content
                     if isinstance(content, list):
                         content = "".join(
@@ -401,23 +408,39 @@ async def process_user_input(content: str) -> None:
                         )
                     await response_msg.stream_token(content)
                     full_response += content
-
+            
             elif kind == "on_tool_start":
                 logger.info(f"Tool started: {event['name']}")
-
+            
             elif kind == "on_tool_end":
                 logger.info(f"Tool ended: {event['name']}, output={event['data'].get('output')}")
         
-        # Finalize response
         await response_msg.update()
         
-        # Update history with AI response
         if full_response:
             history.append(AIMessage(content=full_response))
             history = trim_history(history)
-            
             cl.user_session.set("history", history)
             logger.info(f"Response generated: {len(full_response)} chars")
+            
+            # Send TTS audio response
+            try:
+                audio_bytes = play_audio(full_response)
+                await cl.Message(
+                    content="",
+                    elements=[
+                        cl.Audio(
+                            name="Response",
+                            content=audio_bytes,
+                            mime="audio/mpeg",
+                            display="inline",
+                            auto_play=True
+                        )
+                    ]
+                ).send()
+            except Exception as e:
+                logger.warning(f"TTS failed: {e}")
+        
         else:
             await thinking_msg.remove()
             response_msg.content = "⚠️ No response generated. Please try again."
@@ -434,7 +457,6 @@ async def process_user_input(content: str) -> None:
         await thinking_msg.remove()
         response_msg.content = get_user_friendly_error(e)
         await response_msg.send()
-
 
 
 # ============================================================================
@@ -474,7 +496,10 @@ async def on_chat_start() -> None:
     """Initialize a new chat session"""
     cl.user_session.set("history", [])
     cl.user_session.set("audio_buffer", [])
+    cl.user_session.set("message_history", [])
     logger.info("New chat session started")
+
+
     
 @cl.on_chat_start
 async def start():
@@ -497,6 +522,12 @@ def prompt_decision(conversation):
 async def on_audio_chunk(chunk: cl.InputAudioChunk) -> None:
     """Collect incoming audio chunks"""
     audio_buffer = cl.user_session.get("audio_buffer")
+    
+    # Guard: initialize buffer if session was reset or not yet set
+    if audio_buffer is None:
+        audio_buffer = []
+        cl.user_session.set("audio_buffer", audio_buffer)
+    
     audio_buffer.append(chunk.data)
     cl.user_session.set("audio_buffer", audio_buffer)
     
@@ -602,3 +633,6 @@ async def on_message(message: cl.Message) -> None:
 if __name__ == "__main__":
     logger.info("Starting QuestoHive Voice Chatbot...")
     logger.info(f"Configuration: Model={Config.LLM_MODEL}, Temp={Config.LLM_TEMPERATURE}")
+
+
+
